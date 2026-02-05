@@ -4,6 +4,7 @@ channels:
 dependencies:
   - geopandas
   - python=3.9
+  - rasterio
   - gdal
   - pillow
   - pandas
