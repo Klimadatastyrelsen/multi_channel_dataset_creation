@@ -111,6 +111,15 @@ Cleaning labels can be done by
 python src/multi_channel_dataset_creation/data_cleaning_based_on_newer_ground_truth.py --old_labels dir_with_olod_labels --new_labels dir_with_new_labels --output dir_with_cleaned_labels
 Labels that have changed in this time interval should not be trrusted and are set to ingore value (0)
 
+## Verify that everything works
+
+Do the installation acording to instructions above
+run 
+
+python src/multi_channel_dataset_creation/create_dataset.py   --dataset_config configs/create_dataset_example_dataset.ini
+
+There should be no error messages in output
+
 ---
 
 ## 📘 Notes
