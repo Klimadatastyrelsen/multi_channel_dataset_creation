@@ -64,15 +64,66 @@ These will be rasterized into GeoTIFF label images during dataset creation.
 
 ## Installation
 
+### Conda version
+
+Use **conda** or **mamba** (Miniforge includes conda; mamba is optional). From this repository root (or from a parent folder where all four shared-env repos are cloned as siblings):
+
+```sh
+conda env create --file environment.yml
+conda activate ML_sdfi
+pip install --pre --no-build-isolation -r requirements_pip.txt
+```
+
+This installs PyTorch nightly with CUDA 12.8 (for NVIDIA Blackwell / RTX 50-series / sm_120 GPUs), fastai, git-based deps, and this package in editable mode.
+
+To install the other shared-env repos and extra deps, from the **project root** (parent of all four repos):
+
+```sh
+cd ML_Production && bash install_local_repos.sh && pip install -r requirements_extra.txt && cd ..
+```
+
+**Other GPUs:** To use stable PyTorch instead of nightly (e.g. cu121), after the steps above run:
+
+```sh
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
+
+(Adjust `cu121` to your CUDA version; see [pytorch.org/get-started/locally](https://pytorch.org/get-started/locally).)
+
+**Use conda's libstdc++ (Linux):** On some Linux systems, set this before running Python:
+
+```sh
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+```
+
+**Verify CUDA support:**
+
+```sh
+python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')"
+```
+
+**Windows:** After the steps above, run once: `pip install --force-reinstall pillow rasterio` so PIL and rasterio use pip's Windows wheels.
+
+### Docker version
+
+Pull the prebuilt shared image and run with this repo as working directory:
+
 ```bash
-git clone https://github.com/rasmuspjohansson/multi_channel_dataset_creation.git
-cd multi_channel_dataset_creation
+docker pull rasmuspjohansson/kds_cuda_pytorch:latest
 
-conda env create -f environment.yml
-conda activate multi-channel-env
+docker run --gpus all --shm-size=100g -it \
+  -v /path/to/your/projects:/home/projects \
+  -w /home/projects/multi_channel_dataset_creation \
+  rasmuspjohansson/kds_cuda_pytorch:20260302 \
+  bash
+```
 
-# Install in editable mode so changes in the source code are reflected immediately
-pip install -e .
+To have all four shared-env repos installed in the container, run once from ML_Production (e.g. with `-w /home/projects/ML_Production` and `sh install_local_repos.sh && pip install -r requirements_extra.txt`). Then use `-w /home/projects/multi_channel_dataset_creation` for this repo.
+
+Example after setup:
+
+```bash
+python src/multi_channel_dataset_creation/create_dataset.py --dataset_config configs/create_dataset_example_dataset.ini
 ```
 
 ---

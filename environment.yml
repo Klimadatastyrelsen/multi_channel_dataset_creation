@@ -1,10 +1,15 @@
-name: multi-channel-env
+name: ML_sdfi
 channels:
   - conda-forge
 dependencies:
+  - python=3.10
+  - numpy<2
   - geopandas
-  - python=3.9
   - gdal
-  - pillow
-  - pandas
-  - rasterio
+  - fiona
+  - psutil
+  # rasterio (and Pillow) installed via pip from requirements_pip.txt for Windows-compatible builds
+  - setuptools<76
+  - pip
+  # Pip deps (PyTorch nightly, fastai, git packages, this project) installed in one step after env create:
+  # From repo root: pip install --pre --no-build-isolation -r requirements_pip.txt

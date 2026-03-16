@@ -1,0 +1,17 @@
+# From repo root (with env activated): pip install --pre --no-build-isolation -r requirements_pip.txt
+# PyTorch nightly cu128 for Blackwell GPUs; use --pre to allow pre-release builds.
+--extra-index-url https://download.pytorch.org/whl/nightly/cu128
+torch
+torchvision
+torchaudio
+pillow
+rasterio
+fastai
+ipython
+git+https://github.com/rasmuspjohansson/albumentations-multi-channels
+git+https://github.com/walkwithfastai/walkwithfastai.github.io
+git+https://github.com/SDFIdk/multi_channel_dataset_creation.git
+psycopg2-binary
+reportlab
+huggingface_hub
+-e .
