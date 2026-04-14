@@ -7,3 +7,5 @@ example_dataset/*/*/*
 *.gdbtablx
 *.atx
 timestamps
+.DS_Store
+**/.DS_Store.DS_Store
