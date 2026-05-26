@@ -7,3 +7,7 @@ example_dataset/*/*/*
 *.gdbtablx
 *.atx
 timestamps
+
+# Local tokens (never commit)
+my_hugging_face_token.txt
+my_huggingface_token.txt

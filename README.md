@@ -66,35 +66,20 @@ These will be rasterized into GeoTIFF label images during dataset creation.
 
 ### Conda version
 
-Use **conda** or **mamba** (Miniforge includes conda; mamba is optional). From this repository root (or from a parent folder where all four shared-env repos are cloned as siblings):
+Use **conda** or **mamba** (Miniforge includes conda; mamba is optional). Clone all four shared-env repos as siblings (`ML_Production`, `ML_geo_production`, `ML_sdfi_fastai2`, `multi_channel_dataset_creation`), then run the steps below **from this repository root**. The same files and commands exist in each repo and produce the same `ML_sdfi` environment.
 
 ```sh
-conda env create --file environment.yml
+conda env create --file environment.yml   # once
 conda activate ML_sdfi
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH   # Linux
+
+bash install_pytorch.sh
 pip install --pre --no-build-isolation -r requirements_pip.txt
+bash install_local_repos.sh
+pip install -r requirements_extra.txt
 ```
 
-This installs PyTorch nightly with CUDA 12.8 (for NVIDIA Blackwell / RTX 50-series / sm_120 GPUs), fastai, git-based deps, and this package in editable mode.
-
-To install the other shared-env repos and extra deps, from the **project root** (parent of all four repos):
-
-```sh
-cd ML_Production && bash install_local_repos.sh && pip install -r requirements_extra.txt && cd ..
-```
-
-**Other GPUs:** To use stable PyTorch instead of nightly (e.g. cu121), after the steps above run:
-
-```sh
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-```
-
-(Adjust `cu121` to your CUDA version; see [pytorch.org/get-started/locally](https://pytorch.org/get-started/locally).)
-
-**Use conda's libstdc++ (Linux):** On some Linux systems, set this before running Python:
-
-```sh
-export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
-```
+`install_pytorch.sh` auto-selects the PyTorch CUDA build (nightly cu128 for Blackwell / sm_12.0, stable cu124 for other NVIDIA GPUs). CUDA is required. Override with e.g. `PYTORCH_CUDA=cu121 bash install_pytorch.sh`.
 
 **Verify CUDA support:**
 
@@ -164,12 +149,20 @@ Labels that have changed in this time interval should not be trrusted and are se
 
 ## Verify that everything works
 
-Do the installation acording to instructions above
-run 
+After installation, run the example dataset creation (no CUDA required for this step):
 
-python src/multi_channel_dataset_creation/create_dataset.py   --dataset_config configs/create_dataset_example_dataset.ini
+```bash
+python src/multi_channel_dataset_creation/create_dataset.py --dataset_config configs/create_dataset_example_dataset.ini
+```
 
-There should be no error messages in output
+There should be no error messages in the output.
+
+Automated verification (runs the command above and checks `verification.log` for errors):
+
+```bash
+python verify_functionality.py
+python check_logs.py
+```
 
 ---
 
