@@ -60,6 +60,17 @@ If `original_data` is empty, the tool will use existing images from these subfol
 Labels should be provided as **GeoPackages** containing polygon features marking different semantic areas.  
 These will be rasterized into GeoTIFF label images during dataset creation.
 
+### Class name files (`*_codes.txt`)
+
+Label GeoTIFFs store class IDs as integer pixel values. The `*_codes.txt` files map each ID to a human-readable class name: **line N corresponds to pixel value N** (0-based). These files are used when training with [ML_sdfi_fastai2](https://github.com/SDFIdk/ML_sdfi_fastai2).
+
+| File | Use with |
+|---|---|
+| `example_dataset/labels/ground_surface_codes.txt` | `example_dataset_ground_surface.gpkg` and `configs/create_dataset_example_dataset.ini` |
+| `example_dataset/labels/building_codes.txt` | `example_dataset_buildings.gpkg` and the buildings `geopackage_to_label_v2.py` example below |
+
+When training, copy the appropriate file into your training dataset as `codes.txt`, or point ML_sdfi_fastai2 at the correct path.
+
 ---
 
 ## Installation
@@ -130,11 +141,12 @@ python src/multi_channel_dataset_creation/create_dataset.py -h
 Creating label Images from a GeoPackage can be done with
 
 ```bash
-Example with not labeled areas marked up as ignore_label (background_value == 0)
+# Ground surface: unlabeled areas as ignore (background_value == 0)
+# Class names: example_dataset/labels/ground_surface_codes.txt
 python src/multi_channel_dataset_creation/geopackage_to_label_v2.py   --geopackage example_dataset/labels/example_dataset_ground_surface.gpkg   --input_folder example_dataset/data/rgb/   --output_folder example_dataset/labels/large_labels/   --attribute ML_CATEGORY --background_value 0
 
-Example with all polygons interpreted as label 2 (value_used_for_all_polygons == 2) and unlabeled areas interprted as background class 1 (background_value == 1)
-
+# Buildings: all polygons as label 2, unlabeled areas as background class 1 (background_value == 1)
+# Class names: example_dataset/labels/building_codes.txt
 python src/multi_channel_dataset_creation/geopackage_to_label_v2.py   --geopackage example_dataset/labels/example_dataset_buildings.gpkg   --input_folder example_dataset/data/rgb/   --output_folder example_dataset/labels/large_labels   --background_value 1 --value_used_for_all_polygons 2
 ```
 

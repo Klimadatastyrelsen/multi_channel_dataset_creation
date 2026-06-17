@@ -30,15 +30,20 @@ def main(args):
         print("create_labels")
         print("#######################################")
         #convert the geopackage polygons to label images of same shape as the 'lod-images'
-        parsed_ini_file = parse_ini.parse(args.dataset_config) # aprse the .ini file 
-        geopackage_to_label_v2.process_label_generation_main( geopackage = parsed_ini_file["geopackage"],  
-            input_folder=parsed_ini_file["images_that_define_areas_to_create_labels_for"], 
-            output_folder = parsed_ini_file["mask_folder"], 
-            unknown_border_size = 0.1,
-            attribute = parsed_ini_file["attribute"],
-            background_value= parsed_ini_file["background_value"],
-            ignore_value= parsed_ini_file["ignore_id"],
+        parsed_ini_file = parse_ini.parse(args.dataset_config) # aprse the .ini file
+        label_kwargs = dict(
+            geopackage=parsed_ini_file["geopackage"],
+            input_folder=parsed_ini_file["images_that_define_areas_to_create_labels_for"],
+            output_folder=parsed_ini_file["mask_folder"],
+            unknown_border_size=0.1,
+            background_value=parsed_ini_file["background_value"],
+            ignore_value=parsed_ini_file["ignore_id"],
         )
+        if "value_used_for_all_polygons" in parsed_ini_file:
+            label_kwargs["value_used_for_all_polygons"] = int(parsed_ini_file["value_used_for_all_polygons"])
+        else:
+            label_kwargs["attribute"] = parsed_ini_file["attribute"]
+        geopackage_to_label_v2.process_label_generation_main(**label_kwargs)
 
 
 
