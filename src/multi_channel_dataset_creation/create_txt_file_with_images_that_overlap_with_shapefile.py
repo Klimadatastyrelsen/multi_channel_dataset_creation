@@ -57,8 +57,10 @@ def prune(extent, geotiffs):
     return geotiffs
 
 def create_txt_file_with_files_overlapping_with_shp_file(shape_file,folder,output_txt,images_must_be_crops_of_these_images_path,prune_to_fewer_images):
-    print("Listing all .tif files in "+str(folder)+"...")
-    tiff_files = [str(pathlib.Path(folder)/f) for f in os.listdir(folder) if f.endswith('.tif')]
+    folder_path = pathlib.Path(folder)
+    print(f"Listing all .tif/.tiff files under {folder} (recursive)...")
+    tiff_files = [str(p) for p in folder_path.rglob("*.tif")]
+    tiff_files.extend(str(p) for p in folder_path.rglob("*.tiff"))
 
     if images_must_be_crops_of_these_images_path:
         print("filtering away files that not are crops of the files listed in 'images_must_be_crops_of_these_images_path'")
