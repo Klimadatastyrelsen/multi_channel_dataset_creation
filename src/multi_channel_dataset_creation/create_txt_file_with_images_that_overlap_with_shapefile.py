@@ -1,4 +1,4 @@
-from osgeo import gdal
+from osgeo import gdal, ogr
 import argparse
 import sys
 import os
@@ -68,7 +68,7 @@ def create_txt_file_with_files_overlapping_with_shp_file(shape_file,folder,outpu
             # Read all lines into a list, stripping any trailing newline characters
             large_tiff_files = [line.strip() for line in file]
             #remove the .tif in order to get the part of the filename that also occurs in the crop
-            large_tiff_files =[large_tiff_file.strip(".tif").split("/")[-1] for large_tiff_file in large_tiff_files]
+            large_tiff_files =[os.path.splitext(large_tiff_file)[0].split("/")[-1] for large_tiff_file in large_tiff_files]
 
             tiff_files_that_are_crops_of_set_of_larger_tiff_files = []
             for tiff_file in tiff_files:
@@ -87,11 +87,25 @@ def create_txt_file_with_files_overlapping_with_shp_file(shape_file,folder,outpu
     nr_of_files = len(tiff_files)
     overlapping_tif_files = []
     checked_files=0
-    for filepath in tiff_files:
-        if overlap.shp_geotif_overlap(shp_path=shape_file,tiff_path=filepath):
-             overlapping_tif_files.append(filepath)
-        checked_files+=1
-        print(f"\rPercent ready: {100*(checked_files/nr_of_files)}%", end="")
+
+    # Open the shapefile once and reuse the layer for every geotiff. Re-opening
+    # it on every call leaked a file handle per iteration and eventually
+    # exhausted the OS file-descriptor limit (crashing part-way through).
+    shp_ds = ogr.Open(shape_file)
+    if shp_ds is None:
+        raise RuntimeError(f"Failed to open shapefile: {shape_file}")
+    shp_layer = shp_ds.GetLayer()
+    try:
+        for filepath in tiff_files:
+            if overlap.shp_geotif_overlap(shp_layer=shp_layer, tiff_path=filepath):
+                 overlapping_tif_files.append(filepath)
+            checked_files+=1
+            print(f"\rPercent ready: {100*(checked_files/nr_of_files)}%", end="")
+    finally:
+        # Release the shapefile handle.
+        shp_layer = None
+        shp_ds = None
+    print()
     if prune_to_fewer_images:
         print("pruning")
         extent= get_extent_from_shapefile(shape_file)

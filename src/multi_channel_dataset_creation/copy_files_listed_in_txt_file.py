@@ -17,19 +17,30 @@ def copy_files_to_folder(text_file,origin_folder,destination_folder,new_image_fo
     destination_folder = pathlib.Path(destination_folder)
     os.makedirs(destination_folder, exist_ok = True)
     with open(text_file) as f:
-        lines= f.readlines()
-        #in order to make sure we only have the name of the file and not a complete filepath ,we do: pathlib.Path(line.rstrip()).name 
-        files = [origin_folder/pathlib.Path(line.rstrip()).name for line in lines if os.path.isfile(origin_folder/line.rstrip())]
+        #in order to make sure we only have the name of the file and not a complete filepath ,we do: pathlib.Path(line.rstrip()).name
+        listed_names = [pathlib.Path(line.rstrip()).name for line in f if line.rstrip()]
+
+    nr_listed = len(listed_names)
     print("copying the images noted in " +str(text_file)+ " from :"+str(origin_folder) +" to "+str(destination_folder) +"...")
-    for file in files:
+
+    nr_copied = 0
+    for name in listed_names:
+        source_file = origin_folder / name
+        # Only copy files that actually exist in the source folder, so files
+        # listed in the .txt but living in another folder are skipped instead
+        # of crashing the run.
+        if not source_file.is_file():
+            continue
         if new_image_format:
-            im = Image.open(file)
-            im.save(destination_folder/file.with_suffix(new_image_format).name)
+            im = Image.open(source_file)
+            im.save(destination_folder/source_file.with_suffix(new_image_format).name)
         else:
             # Copy the file
-            shutil.copyfile(file, destination_folder/file.name)
+            shutil.copyfile(source_file, destination_folder/source_file.name)
+        nr_copied += 1
 
     print("done copying the images noted in " +str(text_file)+ " from :"+str(origin_folder) +" to "+str(destination_folder) )
+    print(f"copied {nr_copied} out of {nr_listed} files listed in {text_file}")
 
 
 

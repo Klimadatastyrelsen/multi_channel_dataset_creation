@@ -169,7 +169,7 @@ def remove_overlap_from_all_txt(path_to_all_txt,path_to_valid_txt,folder_path,im
             #remove the .tif in order to get the part of the filename that also occurs in the crop
             #also remove the parent folders
 
-            large_tiff_files =[large_tiff_file.strip(".tif").split("/")[-1] for large_tiff_file in large_tiff_files]
+            large_tiff_files =[os.path.splitext(large_tiff_file)[0].split("/")[-1] for large_tiff_file in large_tiff_files]
 
     # for all files in the dataset (all.txt)
     nr_of_files = len(all_lines)
