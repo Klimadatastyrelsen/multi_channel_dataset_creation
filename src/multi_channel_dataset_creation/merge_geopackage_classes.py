@@ -1,5 +1,25 @@
-import geopandas as gpd
 import argparse
+import os
+import shutil
+import tempfile
+
+import geopandas as gpd
+
+
+def write_geopackage(gdf: gpd.GeoDataFrame, dst: str, layer: str):
+    """Write a GeoDataFrame to a GeoPackage, staging via local disk.
+
+    GeoPackage is SQLite, which needs byte-range locking to open a transaction.
+    Network shares (e.g. CIFS mounts without `nobrl`) do not provide it and fail
+    with "Failed to start transaction", so build the file locally and copy it over.
+    """
+    dst_dir = os.path.dirname(os.path.abspath(dst))
+    os.makedirs(dst_dir, exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = os.path.join(tmp_dir, os.path.basename(dst) or "output.gpkg")
+        gdf.to_file(tmp_path, driver="GPKG", layer=layer)
+        shutil.copyfile(tmp_path, dst)
 
 
 def merge_classes_in_geopackage(src: str, dst: str, column_name: str = "ML_CATEGORY", merge_ids: str = "1,2,3,4,5,6,7,8", layer: str = "VindmoelleLabelTjek - bef"):
@@ -56,8 +76,8 @@ def merge_classes_in_geopackage(src: str, dst: str, column_name: str = "ML_CATEG
                 print(f"Remapped ID {other_id} to {n}")
                 n += 1
 
-    # Save the modified GeoDataFrame to a new GeoPackage file
-    gdf.to_file(dst, driver="GPKG")
+    # Save the modified GeoDataFrame to a new GeoPackage file, keeping the source layer name
+    write_geopackage(gdf, dst, layer=layer)
     print(gdf[column_name].value_counts().sort_index())
 
 if __name__ == "__main__":
