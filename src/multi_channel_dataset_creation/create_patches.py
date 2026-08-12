@@ -58,23 +58,6 @@ def main(config,skip):
     else:
         print("dataset does NOT include any label masks")
 
-    # handle house masks
-    if "mask_folder_houses" in ini_parser[section] and not "split_houses" in skip:
-        print("########################################################")
-        print("dataset includes house masks that should be splitted")
-        large_masks_folder_houses = ini_parser[section]["mask_folder_houses"]
-        splitted_mask_folder_houses = ini_parser[section]["splitted_mask_folder_houses"]
-        print("splitting the houses in "+str(large_masks_folder_houses)+"and string them in folder :"+str(splitted_mask_folder_houses))
-
-        # remove the destination folder and create it anew
-        clear_folder(splitted_mask_folder_houses)
-
-
-        splitf = split.Split()
-        splitf.splitdst(in_path=large_masks_folder_houses, out_path=splitted_mask_folder_houses, tile_size_x=int(ini_parser[section]["tile_size_x"]), tile_size_y=int(ini_parser[section]["tile_size_y"]),kun_ok_pic=False,ignore_id=ignore_id,cutdatatype="mask_NaN",overlap=int(overlap))
-    else:
-        print("dataset does not include any house masks")
-
     if not "create_patches" in skip:
 
         # handle input data
@@ -108,13 +91,6 @@ def main(config,skip):
 
 
 if __name__ == "__main__":
-    """
-    
-    Creates masks given .ini file with : paths to images ,gdb-file, mask_featureclass, and folder for masks.
-    
-    
-    """
-
     usage_example="example usage: \n "+r"python create_patches.py --config path\to\file.ini"
     # Initialize parser
     parser = argparse.ArgumentParser(

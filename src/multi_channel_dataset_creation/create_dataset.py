@@ -69,14 +69,13 @@ def main(args):
     print()
 
 if __name__ == "__main__":
-    usage_example= "python src\multi_channel_dataset_creation\create_dataset.py --dataset_config configs\create_dataset_example_dataset.ini --skip move_data_to_separate_folders create_labels create_houses create_patches split_labels create_text_files"
+    usage_example= "python src\multi_channel_dataset_creation\create_dataset.py --dataset_config configs\create_dataset_example_dataset.ini --skip move_data_to_separate_folders create_labels create_patches split_labels create_text_files"
     # Initialize parser
     parser = argparse.ArgumentParser(
         epilog=usage_example,
         formatter_class=argparse.RawDescriptionHelpFormatter)
 
     parser.add_argument("--dataset_config",help ="path to config.ini file e.g ..\..\configs\template_create_dataset.ini",required=True)
-    #create_dataset.py creates house mask besides the label masks. This is however not strictly nececeary and in order to avoiding adding an extra .gdb file to the repository we skip creation of house masks
-    parser.add_argument("--skip",help ="steps in the process to be skipped: move_data_to_separate_folders create_houses create_labels create_patches split_labels create_text_files",nargs ='+',default =["create_houses"],required=False)
+    parser.add_argument("--skip",help ="steps in the process to be skipped: move_data_to_separate_folders create_labels create_patches split_labels create_text_files",nargs ='+',default =[],required=False)
     args = parser.parse_args()
     main(args)
