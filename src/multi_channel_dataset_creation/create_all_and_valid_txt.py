@@ -7,7 +7,7 @@ import pathlib
 import create_train_txt
 import time
 import shutil
-import overlap
+import overlap_fast
 import random
 
 
@@ -151,71 +151,38 @@ def remove_overlap_from_all_txt(path_to_all_txt,path_to_valid_txt,folder_path,im
     path_to_all_txt = pathlib.Path(path_to_all_txt)
     path_to_valid_txt = pathlib.Path(path_to_valid_txt)
 
-    train_files = []  # all files not present in valid.txt
-    images_overlapping_with_images_in_validationset = []
-
     with open(path_to_all_including_overlap, "r") as all_files:
         all_lines = [line.strip() for line in all_files.readlines()]
         random.shuffle(all_lines)
     with open(path_to_valid_txt, "r") as valid_file:
         valid_lines = [line.strip() for line in valid_file.readlines()]
 
-    if images_must_be_crops_of_these_images_path:
-        #if we have .txt file that lists all large unsplitted .tif files that the crops must come from.
-        #such a list can be created by listng all large files that intersect with the .shp
-        with open(images_must_be_crops_of_these_images_path, 'r') as file:
-            # Read all lines into a list, stripping any trailing newline characters
-            large_tiff_files = [line.strip() for line in file]
-            #remove the .tif in order to get the part of the filename that also occurs in the crop
-            #also remove the parent folders
+    def overlap_progress(phase, processed, total, _filename):
+        elapsed = time.time() - create_all_without_overlap_txt_start
+        time_per_step = elapsed / processed
+        if phase == "footprints":
+            label = "reading overlap footprints"
+        else:
+            label = "create all_without_overlap.txt processed"
+        create_train_txt.print_overwrite(
+            label
+            + " :"
+            + str(processed)
+            + " out of :"
+            + str(total)
+            + " estimated time left : "
+            + str((time_per_step * (total - processed)) / 60)
+            + " minutes"
+        )
 
-            large_tiff_files =[os.path.splitext(large_tiff_file)[0].split("/")[-1] for large_tiff_file in large_tiff_files]
-
-    # for all files in the dataset (all.txt)
-    nr_of_files = len(all_lines)
-    finnished_file = 0
-    for filename in all_lines:
-        found_file = False
-        found_overlapping_file = False
-        search_for_overlap = True
-
-        if images_must_be_crops_of_these_images_path:
-            #e.g: remove the "_7000_2880.tif" part of "O2021_82_24_1_0020_00004289_7000_2880.tif"
-            # if the trainingset set file is a croped version of any of the large tiff images that intersect with the validationset
-            #then we should check for actuall overlaps
-
-            #input("_".join(filename.split("_")[0:-2]))
-            #input(large_tiff_files[0])
-            if not ("_".join(filename.split("_")[0:-2]) in large_tiff_files):
-                search_for_overlap = False
-                print("dont search for overlap")
-            else:
-                search_for_overlap = True
-                print("search for overlap")
-
-        if search_for_overlap:
-            # compare it to each file in valid.txt
-            for validset_filename in valid_lines:
-                # file in all.txt is present in valid.txt and should therfore not be present in train.txt
-                if validset_filename in filename:
-                    found_file = True
-                    break
-
-                # file in all.txt is overlapping with file in valid.txt and should therfore not be present in train.txt
-                if overlap.geotiff_overlap(str(pathlib.Path(folder_path) / validset_filename),
-                                           str(pathlib.Path(folder_path) / filename)):
-                    found_overlapping_file = True
-                    images_overlapping_with_images_in_validationset.append(filename)
-                    break
-
-        if (not found_file) and (not found_overlapping_file):
-            train_files.append(filename)
-
-        finnished_file += 1
-        time_per_image = (time.time() - create_all_without_overlap_txt_start) / finnished_file
-        create_train_txt.print_overwrite("create all_without_overlap.txt processed :" + str(finnished_file) + " out of :" + str(
-            nr_of_files) + " estimated time left : " + str(
-            (time_per_image * (nr_of_files - finnished_file)) / 60) + " minutes")
+    train_files, images_overlapping_with_images_in_validationset = overlap_fast.remove_overlap_fast(
+        all_filenames=all_lines,
+        valid_filenames=valid_lines,
+        folder_path=pathlib.Path(folder_path),
+        images_must_be_crops_of_these_images_path=images_must_be_crops_of_these_images_path,
+        cache_path=pathlib.Path(path_to_all_txt).parent / ".overlap_footprints_cache.json",
+        progress_callback=overlap_progress,
+    )
 
     print()  # go to a new line since the last print did not do this
     print("found : " + str(len(
@@ -223,7 +190,7 @@ def remove_overlap_from_all_txt(path_to_all_txt,path_to_valid_txt,folder_path,im
 
     # write the files with overlap with valid.txt to "tmp_debug_overlapping_files.txt in same folder as all.txt in order to be able to check them manually"
     with open(pathlib.Path(path_to_all_txt).parent/"tmp_debug_overlapping_files.txt", "w") as overlap_file:
-        overlap_file.write.write("\n".join(images_overlapping_with_images_in_validationset))
+        overlap_file.write("\n".join(images_overlapping_with_images_in_validationset))
 
 
     # write the files without overlap with valid.txt and the files in valid.txt to path_to_all_wihout_overlap
