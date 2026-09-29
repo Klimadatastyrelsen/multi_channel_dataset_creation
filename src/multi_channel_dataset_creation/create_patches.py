@@ -2,6 +2,7 @@ import split
 from pathlib import Path
 import configparser
 import argparse
+import os
 import shutil
 import json
 import time
@@ -36,6 +37,10 @@ def main(config,skip):
     overlap = ini_parser[section]["overlap"]
 
     ignore_id = int(ini_parser[section]["ignore_id"])
+    nr_of_split_processes = 1
+    if "nr_of_split_processes" in ini_parser[section]:
+        nr_of_split_processes = int(ini_parser[section]["nr_of_split_processes"])
+    print("nr_of_split_processes = " + str(nr_of_split_processes))
 
 
     #handle label masks
@@ -52,7 +57,7 @@ def main(config,skip):
 
 
         splitf = split.Split()
-        splitf.splitdst(in_path=large_masks_folder, out_path=splitted_mask_folder, tile_size_x=int(ini_parser[section]["tile_size_x"]),tile_size_y=int(ini_parser[section]["tile_size_y"]),kun_ok_pic=False,ignore_id=ignore_id,cutdatatype="mask_NaN",overlap=int(overlap))
+        splitf.splitdst(in_path=large_masks_folder, out_path=splitted_mask_folder, tile_size_x=int(ini_parser[section]["tile_size_x"]),tile_size_y=int(ini_parser[section]["tile_size_y"]),kun_ok_pic=False,ignore_id=ignore_id,cutdatatype="mask_NaN",overlap=int(overlap),nr_of_processes=nr_of_split_processes)
     elif "split_labels" in skip:
         print("skipping 'split_labels'")
     else:
@@ -81,7 +86,7 @@ def main(config,skip):
                 cutdatatype = "single_channel"
             else:
                 sys.exit("dont know how to splitt data of type :"+str(data_folder.name))
-            failed_files = splitf.splitdst(in_path=data_folder, out_path=splitted_folder, tile_size_x=int(tile_size_x), tile_size_y=int(tile_size_y),kun_ok_pic=False,ignore_id=ignore_id,cutdatatype=cutdatatype,stop_on_error=False,overlap=int(overlap))
+            failed_files = splitf.splitdst(in_path=data_folder, out_path=splitted_folder, tile_size_x=int(tile_size_x), tile_size_y=int(tile_size_y),kun_ok_pic=False,ignore_id=ignore_id,cutdatatype=cutdatatype,stop_on_error=False,overlap=int(overlap),nr_of_processes=nr_of_split_processes)
             if len(failed_files)>0:
                 print("###############################################################")
                 print("failed to split the following files: "+str(failed_files))

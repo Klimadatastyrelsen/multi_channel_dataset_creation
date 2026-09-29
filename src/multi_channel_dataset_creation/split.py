@@ -13,19 +13,30 @@ _all__ = ["split"]
 _logger = logging.getLogger(__name__)
 
 
-
+def _split_one_file_worker(pair):
+    """Module-level worker so multiprocessing spawn can pickle it."""
+    start_time = time.time()
+    (nr_of_files, index, in_path, out_path, filename, tile_size_x, tile_size_y, cutdatatype, kun_ok_pic, ignore_id, overlap) = pair
+    print(f"Processing file : {filename} , nr: {index} , out of: {nr_of_files}")
+    try:
+        os.environ.setdefault("GDAL_NUM_THREADS", "1")
+        Split().splitfile(
+            in_path, out_path, filename, tile_size_x, tile_size_y, cutdatatype,
+            kun_ok_pic=kun_ok_pic, nodata=ignore_id, overlap=overlap,
+        )
+        elapsed_min = (time.time() - start_time) / 60.0
+        print(f"Done Processing file : {filename} ,took {elapsed_min} , minutes ")
+        return {"ok": True, "filename": filename, "elapsed_min": elapsed_min, "index": index}
+    except Exception as e:
+        print(f"FAILED Processing file : {filename} : {e}")
+        return {"ok": False, "filename": filename, "error": str(e), "index": index}
 
 
 class Split():
     def __init__(self):
         pass
     def helper_function(self,pair):
-        start_time = time.time()
-        "a function for making it easier to run the splitfile() function in parralell"
-        (nr_of_files,index,in_path, out_path, filename, tile_size_x, tile_size_y,cutdatatype,kun_ok_pic,ignore_id,overlap) = pair
-        print(f"Processing file : {filename} , nr: {index} , out of: {nr_of_files}")
-        self.splitfile(in_path, out_path, filename, tile_size_x, tile_size_y,cutdatatype,kun_ok_pic=kun_ok_pic,nodata=ignore_id,overlap=overlap)
-        print(f"Done Processing file : {filename} ,took {(time.time()-start_time)/60.0} , minutes ")
+        return _split_one_file_worker(pair)
     '''
     dont use this !!
     def split(in_path, out_path, tile_size_x, tile_size_y, kun_ok_pic=False, centrer_opklip=False,
@@ -98,26 +109,22 @@ class Split():
 
             # Create a pool of worker processes
             print("creating pool of : " +str(int(nr_of_processes))+ " nr of processes")
-            pool = mp.Pool(processes=int(nr_of_processes))
-
-            # Use pool.map to parallelize the loop
-            pool.map(self.helper_function ,[[nr_of_files,index,in_path, out_path, filename, tile_size_x, tile_size_y,cutdatatype,kun_ok_pic,ignore_id,overlap] for (index,filename) in enumerate(filelist)],1) #setting chunksizze to 1 to keep the order intact
-
-            # Close and join the pool to free up resources
-            pool.close()
-            pool.join()
+            jobs = [[nr_of_files,index,in_path, out_path, filename, tile_size_x, tile_size_y,cutdatatype,kun_ok_pic,ignore_id,overlap] for (index,filename) in enumerate(filelist)]
+            # fork on Linux: spawn re-imports __main__ and breaks runpy/stdin runners
+            ctx = mp.get_context("fork")
+            with ctx.Pool(processes=int(nr_of_processes), maxtasksperchild=8) as pool:
+                results = pool.map(_split_one_file_worker, jobs, 1)
+            failed_files = [r["filename"] for r in results if not r.get("ok")]
         else:
             for (index,filename) in enumerate(filelist):
                 print("working on image nr: "+str(index) + " out of : "+str(len(filelist)))
-
-                if stop_on_error:
-                    self.splitfile(in_path, out_path, filename, tile_size_x, tile_size_y,cutdatatype,kun_ok_pic=kun_ok_pic,nodata=ignore_id,overlap=overlap)
-                else:
-                    try:
-                        self.splitfile(in_path, out_path, filename, tile_size_x, tile_size_y, cutdatatype,
-                                   kun_ok_pic=kun_ok_pic, nodata=ignore_id,overlap=overlap)
-                    except:
-                        failed_files.append(in_path)
+                result = _split_one_file_worker(
+                    [nr_of_files, index, in_path, out_path, filename, tile_size_x, tile_size_y, cutdatatype, kun_ok_pic, ignore_id, overlap]
+                )
+                if not result.get("ok"):
+                    if stop_on_error:
+                        raise RuntimeError(result.get("error", "splitfile failed"))
+                    failed_files.append(filename)
         return failed_files
 
 
@@ -139,6 +146,7 @@ class Split():
             band = ds.GetRasterBand(1)
             xsize = band.XSize
             ysize = band.YSize
+            ds = None
             if debug:
                 print("Xsize={} Ysize={}".format(xsize, ysize))
             """
@@ -238,6 +246,7 @@ class Split():
                         # ' -a_srs EPSG:25832 -co TILED=YES -co PHOTOMETRIC=RGB -co COMPRESS=LZW ' # old style
                     # ' -a_srs EPSG:25832 -co TILED=YES -co PHOTOMETRIC=RGB -co COMPRESS=LZW -a_offset 3 -a_nodata 3 '  # fix nodata problem monochrome mask (old style)
                     ds = gdal.Translate(outputfilepath, inputfilepath, options=options)
+                    ds = None
                     sub_tiles += 1
             if debug:
                 print("Cut into {} sub tiles".format(sub_tiles))
