@@ -49,12 +49,15 @@ import rasterio
 from rasterio.errors import NotGeoreferencedWarning
 from rasterio.transform import from_bounds
 from rasterio.warp import transform_bounds
+from rasterio.windows import Window
 from tqdm import tqdm
 
 log = logging.getLogger("download_data_for_images")
 
 TARGET_CRS = "EPSG:25832"
 WMS_FORMAT = "image/jpeg"
+# Dataforsyningen WMS rejects WIDTH or HEIGHT above this.
+MAX_REQUEST_PIXELS = 10000
 RETRYABLE_HTTP_CODES = frozenset({408, 429, 500, 502, 503, 504})
 Bbox = Tuple[float, float, float, float]
 
@@ -280,10 +283,46 @@ def getmap_url(token: str, base: str, layer: str, bbox: Bbox, width: int, height
     )
 
 
-def getcoverage_url(token: str, base: str, coverage: str, bbox: Bbox, resolution: float) -> str:
+def pixel_edges(size: int, max_pixels: int = MAX_REQUEST_PIXELS) -> List[int]:
+    """Split a pixel axis into pieces no larger than max_pixels."""
+    if size < 1:
+        raise ValueError(f"image size must be >= 1, got {size}")
+    edges = list(range(0, size, max_pixels))
+    if edges[-1] != size:
+        edges.append(size)
+    return edges
+
+
+def pixel_windows(width: int, height: int, max_pixels: int = MAX_REQUEST_PIXELS) -> List[Tuple[int, int, int, int]]:
+    """Return (col0, row0, col1, row1) windows covering width x height."""
+    cols = pixel_edges(width, max_pixels)
+    rows = pixel_edges(height, max_pixels)
+    windows = []
+    for row_index in range(len(rows) - 1):
+        for col_index in range(len(cols) - 1):
+            windows.append((cols[col_index], rows[row_index], cols[col_index + 1], rows[row_index + 1]))
+    return windows
+
+
+def sub_bbox(bbox: Bbox, width: int, height: int, col0: int, row0: int, col1: int, row1: int) -> Bbox:
+    """Map a pixel window onto the footprint. Row 0 is the northern edge."""
+    xmin, ymin, xmax, ymax = bbox
+    x0 = xmin + (xmax - xmin) * col0 / width
+    x1 = xmin + (xmax - xmin) * col1 / width
+    y1 = ymax - (ymax - ymin) * row0 / height
+    y0 = ymax - (ymax - ymin) * row1 / height
+    return (x0, y0, x1, y1)
+
+
+def coverage_size(bbox: Bbox, resolution: float) -> Tuple[int, int]:
     xmin, ymin, xmax, ymax = bbox
     width = max(1, int(round((xmax - xmin) / resolution)))
     height = max(1, int(round((ymax - ymin) / resolution)))
+    return width, height
+
+
+def getcoverage_url(token: str, base: str, coverage: str, bbox: Bbox, width: int, height: int) -> str:
+    xmin, ymin, xmax, ymax = bbox
     return (
         f"{base}?token={token}"
         f"&SERVICE=WCS&VERSION=1.0.0&REQUEST=GetCoverage"
@@ -348,69 +387,146 @@ def write_bytes(path: Path, payload: bytes) -> None:
         path.write_bytes(local_out.read_bytes())
 
 
-def download_wms(job: dict) -> None:
-    bbox = job["bbox"]
-    width = job["width"]
-    height = job["height"]
+def geotiff_profile(width: int, height: int, bbox: Bbox, count: int, dtype: str) -> dict:
+    xmin, ymin, xmax, ymax = bbox
+    profile = {
+        "driver": "GTiff",
+        "height": height,
+        "width": width,
+        "count": count,
+        "dtype": dtype,
+        "crs": TARGET_CRS,
+        "transform": from_bounds(xmin, ymin, xmax, ymax, width, height),
+        "compress": "lzw",
+    }
+    # TIFF tiles must be multiples of 16 and no larger than the image.
+    if width >= 16 and height >= 16:
+        profile["tiled"] = True
+        profile["blockxsize"] = max(16, (min(256, width) // 16) * 16)
+        profile["blockysize"] = max(16, (min(256, height) // 16) * 16)
+    return profile
+
+
+def reject_service_error(payload: bytes, content_type: str, folder: str, service_name: str) -> None:
+    if (not looks_like_image(payload)) or "xml" in content_type or "text" in content_type:
+        snippet = payload[:300].decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"{service_name} did not return an image for {folder} "
+            f"(content-type={content_type!r}). Response starts with:\n{snippet}"
+        )
+
+
+def read_wms_array(job: dict, bbox: Bbox, width: int, height: int):
     url = getmap_url(job["token"], job["base"], job["layer"], bbox, width, height)
     try:
         payload, content_type = http_get(url, job["token"], timeout=120, retries=job["retries"])
     except urllib.error.URLError as exc:
         raise RuntimeError(f"WMS GetMap failed: {hide_token(str(exc), job['token'])}") from exc
-
-    if (not looks_like_image(payload)) or "xml" in content_type or "text" in content_type:
-        snippet = payload[:300].decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"WMS did not return an image for {job['folder']} "
-            f"(content-type={content_type!r}). Response starts with:\n{snippet}"
-        )
-
-    xmin, ymin, xmax, ymax = bbox
-    with tempfile.TemporaryDirectory(prefix="orto_tile_") as tmp:
+    reject_service_error(payload, content_type, job["folder"], "WMS")
+    with tempfile.TemporaryDirectory(prefix="orto_piece_") as tmp:
         raw_path = Path(tmp) / "tile.jpg"
         raw_path.write_bytes(payload)
-        # The JPEG has no georeferencing; the GeoTIFF transform is set below.
+        # The JPEG has no georeferencing; the caller sets the GeoTIFF transform.
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", NotGeoreferencedWarning)
             with rasterio.open(raw_path) as src:
                 data = src.read()
                 count = src.count
                 dtype = src.dtypes[0]
-        profile = {
-            "driver": "GTiff",
-            "height": height,
-            "width": width,
-            "count": count,
-            "dtype": dtype,
-            "crs": TARGET_CRS,
-            "transform": from_bounds(xmin, ymin, xmax, ymax, width, height),
-            "compress": "lzw",
-        }
-        # TIFF tiles must be multiples of 16 and no larger than the image.
-        if width >= 16 and height >= 16:
-            profile["tiled"] = True
-            profile["blockxsize"] = max(16, (min(256, width) // 16) * 16)
-            profile["blockysize"] = max(16, (min(256, height) // 16) * 16)
+    if data.shape[1] != height or data.shape[2] != width:
+        raise RuntimeError(f"WMS returned {data.shape[2]}x{data.shape[1]} for {job['folder']}, expected {width}x{height}")
+    return data, count, dtype
+
+
+def download_wms(job: dict) -> None:
+    bbox = job["bbox"]
+    width = job["width"]
+    height = job["height"]
+    windows = pixel_windows(width, height)
+    #if we try to download to large an area, we need to download it in several patches and patch them together
+    if len(windows) > 1:
+        log.info(
+            "%s is %d x %d pixels; downloading %d WMS pieces (max %d)",
+            job["out_path"].name,
+            width,
+            height,
+            len(windows),
+            MAX_REQUEST_PIXELS,
+        )
+    with tempfile.TemporaryDirectory(prefix="orto_tile_") as tmp:
         local_out = Path(tmp) / job["out_path"].name
-        with rasterio.open(local_out, "w", **profile) as dst:
-            dst.write(data)
+        destination = None
+        try:
+            for col0, row0, col1, row1 in windows:
+                piece_bbox = sub_bbox(bbox, width, height, col0, row0, col1, row1)
+                data, count, dtype = read_wms_array(job, piece_bbox, col1 - col0, row1 - row0)
+                if destination is None:
+                    destination = rasterio.open(
+                        local_out, "w", **geotiff_profile(width, height, bbox, count, dtype)
+                    )
+                elif data.shape[0] != destination.count or data.dtype != destination.dtypes[0]:
+                    raise RuntimeError(f"WMS piece for {job['folder']} does not match the first piece")
+                destination.write(data, window=Window(col0, row0, col1 - col0, row1 - row0))
+        finally:
+            if destination is not None:
+                destination.close()
         write_bytes(job["out_path"], local_out.read_bytes())
 
 
-def download_wcs(job: dict) -> None:
-    url = getcoverage_url(job["token"], job["base"], job["layer"], job["bbox"], job["resolution"])
+def read_wcs_bytes(job: dict, bbox: Bbox, width: int, height: int) -> bytes:
+    url = getcoverage_url(job["token"], job["base"], job["layer"], bbox, width, height)
     try:
         payload, content_type = http_get(url, job["token"], timeout=180, retries=job["retries"])
     except urllib.error.URLError as exc:
         raise RuntimeError(f"WCS GetCoverage failed: {hide_token(str(exc), job['token'])}") from exc
+    reject_service_error(payload, content_type, job["folder"], "WCS")
+    return payload
 
-    if (not looks_like_image(payload)) or "xml" in content_type or "text" in content_type:
-        snippet = payload[:300].decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"WCS did not return a GeoTIFF for {job['folder']} "
-            f"(content-type={content_type!r}). Response starts with:\n{snippet}"
-        )
-    write_bytes(job["out_path"], payload)
+
+def download_wcs(job: dict) -> None:
+    bbox = job["bbox"]
+    width, height = coverage_size(bbox, job["resolution"])
+    windows = pixel_windows(width, height)
+    if len(windows) == 1:
+        write_bytes(job["out_path"], read_wcs_bytes(job, bbox, width, height))
+        return
+    log.info(
+        "%s is %d x %d pixels; downloading %d WCS pieces (max %d)",
+        job["out_path"].name,
+        width,
+        height,
+        len(windows),
+        MAX_REQUEST_PIXELS,
+    )
+    with tempfile.TemporaryDirectory(prefix="wcs_tile_") as tmp:
+        local_out = Path(tmp) / job["out_path"].name
+        destination = None
+        try:
+            for col0, row0, col1, row1 in windows:
+                piece_bbox = sub_bbox(bbox, width, height, col0, row0, col1, row1)
+                payload = read_wcs_bytes(job, piece_bbox, col1 - col0, row1 - row0)
+                piece_path = Path(tmp) / f"piece_{col0}_{row0}.tif"
+                piece_path.write_bytes(payload)
+                with rasterio.open(piece_path) as src:
+                    data = src.read()
+                    count = src.count
+                    dtype = src.dtypes[0]
+                if data.shape[1] != row1 - row0 or data.shape[2] != col1 - col0:
+                    raise RuntimeError(
+                        f"WCS returned {data.shape[2]}x{data.shape[1]} for {job['folder']}, "
+                        f"expected {col1 - col0}x{row1 - row0}"
+                    )
+                if destination is None:
+                    destination = rasterio.open(
+                        local_out, "w", **geotiff_profile(width, height, bbox, count, dtype)
+                    )
+                elif count != destination.count or dtype != destination.dtypes[0]:
+                    raise RuntimeError(f"WCS piece for {job['folder']} does not match the first piece")
+                destination.write(data, window=Window(col0, row0, col1 - col0, row1 - row0))
+        finally:
+            if destination is not None:
+                destination.close()
+        write_bytes(job["out_path"], local_out.read_bytes())
 
 
 def download_one(job: dict) -> None:
