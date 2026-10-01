@@ -56,8 +56,9 @@ log = logging.getLogger("download_data_for_images")
 
 TARGET_CRS = "EPSG:25832"
 WMS_FORMAT = "image/jpeg"
-# Dataforsyningen WMS rejects WIDTH or HEIGHT above this.
-MAX_REQUEST_PIXELS = 10000
+# Dataforsyningen WMS rejects WIDTH or HEIGHT above 10000. Pieces are kept
+# at 1000 so a single request is small enough to avoid gateway timeouts.
+MAX_REQUEST_PIXELS = 1000
 RETRYABLE_HTTP_CODES = frozenset({408, 429, 500, 502, 503, 504})
 Bbox = Tuple[float, float, float, float]
 
