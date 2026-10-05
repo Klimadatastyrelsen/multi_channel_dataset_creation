@@ -285,12 +285,18 @@ def getmap_url(token: str, base: str, layer: str, bbox: Bbox, width: int, height
 
 
 def pixel_edges(size: int, max_pixels: int = MAX_REQUEST_PIXELS) -> List[int]:
-    """Split a pixel axis into pieces no larger than max_pixels."""
+    """Split a pixel axis into pieces no larger than max_pixels.
+
+    A remainder of 1 or 2 pixels is merged into the previous piece.
+    Dataforsyningen rejects WIDTH or HEIGHT below 3.
+    """
     if size < 1:
         raise ValueError(f"image size must be >= 1, got {size}")
     edges = list(range(0, size, max_pixels))
     if edges[-1] != size:
         edges.append(size)
+    if len(edges) >= 3 and edges[-1] - edges[-2] <= 2:
+        del edges[-2]
     return edges
 
 
