@@ -1,29 +1,37 @@
 #!/usr/bin/env python3
 """
-Download Dataforsyningen products for each footprint.
+Download Datafordeler products, or cut them from local VRTs, for each footprint.
 
 Footprints come from a folder of GeoTIFFs, or from the bounding box of each
 feature in a shapefile. For every footprint and every name in ``--datatypes``,
 writes::
 
-    output_folder/DATATYPE/<name>.tif
+    output_folder/<DATATYPES[name]["output_folder"]>/<name>.tif
 
-Example (images)::
+``*_datafordeler`` and ``*_vrt`` versions of a product share an output folder
+(e.g. DSM_datafordeler and DSM_vrt both write to DSM/), so only one of them
+can be requested per run.
+
+Each output has the footprint's extent and resolution: WMS and WCS requests
+ask for the footprint's bbox at its exact width and height, so the server
+resamples (e.g. 0.4 m DHM to 0.1 m image pixels). VRT sources are warped onto
+the same grid locally.
+
+Example (images; the API key is read from ~/datafordelar_key.txt)::
 
   python download_data_for_images.py \\
-    --token TOKEN \\
     --images_or_shapefile_defining_footprints /path/to/images \\
-    --datatypes OrtoRGB OrtoCIR DSM DTM \\
+    --datatypes OrtoRGB_datafordeler OrtoCIR_datafordeler DSM_vrt DTM_vrt \\
     --output_folder /path/to/out \\
     --skip_existing
 
 Example (shapefile; --resolution is required)::
 
   python download_data_for_images.py \\
-    --token TOKEN \\
+    --apikey_file /path/to/key.txt \\
     --images_or_shapefile_defining_footprints /path/to/areas.shp \\
     --resolution 0.125 \\
-    --datatypes OrtoRGB OrtoCIR DSM DTM \\
+    --datatypes OrtoRGB_datafordeler OrtoCIR_datafordeler DSM_datafordeler DTM_datafordeler \\
     --output_folder /path/to/out \\
     --skip_existing
 """
@@ -46,8 +54,10 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 import geopandas as gpd
 import pandas as pd
 import rasterio
+from rasterio.enums import Resampling
 from rasterio.errors import NotGeoreferencedWarning
 from rasterio.transform import from_bounds
+from rasterio.vrt import WarpedVRT
 from rasterio.warp import transform_bounds
 from rasterio.windows import Window
 from tqdm import tqdm
@@ -56,33 +66,73 @@ log = logging.getLogger("download_data_for_images")
 
 TARGET_CRS = "EPSG:25832"
 WMS_FORMAT = "image/jpeg"
-# Dataforsyningen WMS rejects WIDTH or HEIGHT above 10000. Pieces are kept
+DEFAULT_APIKEY_FILE = Path.home() / "datafordelar_key.txt"
+# Datafordeler WMS rejects WIDTH or HEIGHT above 10000. Pieces are kept
 # at 1000 so a single request is small enough to avoid gateway timeouts.
 MAX_REQUEST_PIXELS = 1000
 RETRYABLE_HTTP_CODES = frozenset({408, 429, 500, 502, 503, 504})
 Bbox = Tuple[float, float, float, float]
 
-# Friendly name -> Dataforsyningen service.
+ORTO_WMS = "https://wms.datafordeler.dk/GeoDanmarkOrto/orto_foraar/1.0.0/WMS"
+DHM_WCS = "https://wcs.datafordeler.dk/DHMNedboer/dhm_wcs/1.0.0/WCS"
+
+# Default folder for the VRTs; override with --vrt_dir. The defaults are test
+# VRTs with dummy data covering Denmark at 1 km resolution.
+DEFAULT_VRT_DIR = Path("/mnt/T/mnt/trainingdata/test_data")
+RGB_VRT = "denmark_test_1km.vrt"
+FLOAT_VRT = "denmark_test_1km_float32.vrt"
+
+# Friendly name -> Datafordeler service or local VRT.
+# VRT "path" is relative to the VRT folder. "resampling" is a
+# rasterio.enums.Resampling name.
 DATATYPES: Dict[str, dict] = {
-    "OrtoRGB": {
+    "OrtoRGB_datafordeler": {
         "service": "wms",
-        "base": "https://api.dataforsyningen.dk/orto_foraar_DAF",
+        "base": ORTO_WMS,
         "name": "geodanmark_2025_12_5cm",
+        "output_folder": "OrtoRGB",
     },
-    "OrtoCIR": {
+    "OrtoCIR_datafordeler": {
         "service": "wms",
-        "base": "https://api.dataforsyningen.dk/orto_foraar_DAF",
+        "base": ORTO_WMS,
         "name": "geodanmark_2025_12_5cm_cir",
+        "output_folder": "OrtoCIR",
     },
-    "DSM": {
+    "DSM_datafordeler": {
         "service": "wcs",
-        "base": "https://api.dataforsyningen.dk/dhm_wcs_DAF",
+        "base": DHM_WCS,
         "name": "dhm_overflade",
+        "output_folder": "DSM",
     },
-    "DTM": {
+    "DTM_datafordeler": {
         "service": "wcs",
-        "base": "https://api.dataforsyningen.dk/dhm_wcs_DAF",
+        "base": DHM_WCS,
         "name": "dhm_terraen",
+        "output_folder": "DTM",
+    },
+    "OrtoRGB_vrt": {
+        "service": "vrt",
+        "path": RGB_VRT,
+        "resampling": "bilinear",
+        "output_folder": "OrtoRGB",
+    },
+    "OrtoCIR_vrt": {
+        "service": "vrt",
+        "path": RGB_VRT,
+        "resampling": "bilinear",
+        "output_folder": "OrtoCIR",
+    },
+    "DSM_vrt": {
+        "service": "vrt",
+        "path": FLOAT_VRT,
+        "resampling": "bilinear",
+        "output_folder": "DSM",
+    },
+    "DTM_vrt": {
+        "service": "vrt",
+        "path": FLOAT_VRT,
+        "resampling": "bilinear",
+        "output_folder": "DTM",
     },
 }
 
@@ -269,13 +319,19 @@ def resolve_datatypes(names: Sequence[str]) -> List[Tuple[str, dict]]:
         raise ValueError(f"Unknown --datatypes: {unknown}. Valid choices: {valid}")
     if not resolved:
         raise ValueError("Provide at least one --datatypes entry.")
+    by_folder: Dict[str, List[str]] = {}
+    for key, cfg in resolved:
+        by_folder.setdefault(cfg["output_folder"], []).append(key)
+    clashes = {folder: keys for folder, keys in by_folder.items() if len(keys) > 1}
+    if clashes:
+        raise ValueError(f"These --datatypes would write to the same output folder: {clashes}")
     return resolved
 
 
 def getmap_url(token: str, base: str, layer: str, bbox: Bbox, width: int, height: int) -> str:
     xmin, ymin, xmax, ymax = bbox
     return (
-        f"{base}?token={token}"
+        f"{base}?apikey={urllib.parse.quote(token, safe='')}"
         f"&SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap"
         f"&LAYERS={layer}&STYLES=&SRS={TARGET_CRS}"
         f"&BBOX={xmin},{ymin},{xmax},{ymax}"
@@ -288,7 +344,7 @@ def pixel_edges(size: int, max_pixels: int = MAX_REQUEST_PIXELS) -> List[int]:
     """Split a pixel axis into pieces no larger than max_pixels.
 
     A remainder of 1 or 2 pixels is merged into the previous piece.
-    Dataforsyningen rejects WIDTH or HEIGHT below 3.
+    The services reject WIDTH or HEIGHT below 3.
     """
     if size < 1:
         raise ValueError(f"image size must be >= 1, got {size}")
@@ -331,7 +387,7 @@ def coverage_size(bbox: Bbox, resolution: float) -> Tuple[int, int]:
 def getcoverage_url(token: str, base: str, coverage: str, bbox: Bbox, width: int, height: int) -> str:
     xmin, ymin, xmax, ymax = bbox
     return (
-        f"{base}?token={token}"
+        f"{base}?apikey={urllib.parse.quote(token, safe='')}"
         f"&SERVICE=WCS&VERSION=1.0.0&REQUEST=GetCoverage"
         f"&COVERAGE={coverage}&CRS={TARGET_CRS}&RESPONSE_CRS={TARGET_CRS}"
         f"&BBOX={xmin},{ymin},{xmax},{ymax}"
@@ -536,11 +592,45 @@ def download_wcs(job: dict) -> None:
         write_bytes(job["out_path"], local_out.read_bytes())
 
 
+def download_vrt(job: dict) -> None:
+    """Warp the VRT onto the footprint grid and write it as a GeoTIFF."""
+    bbox = job["bbox"]
+    width = job["width"]
+    height = job["height"]
+    with rasterio.open(job["path"]) as src:
+        if src.crs is None:
+            raise RuntimeError(f"{job['path']} has no CRS")
+        src_bounds = src.bounds
+        if str(src.crs) != TARGET_CRS:
+            src_bounds = transform_bounds(src.crs, TARGET_CRS, *src_bounds, densify_pts=21)
+        xmin, ymin, xmax, ymax = bbox
+        if xmin < src_bounds[0] or ymin < src_bounds[1] or xmax > src_bounds[2] or ymax > src_bounds[3]:
+            raise RuntimeError(f"Footprint {bbox} is not fully inside {job['path']} (bounds {tuple(src_bounds)})")
+        with WarpedVRT(
+            src,
+            crs=TARGET_CRS,
+            transform=from_bounds(xmin, ymin, xmax, ymax, width, height),
+            width=width,
+            height=height,
+            resampling=Resampling[job["resampling"]],
+        ) as warped:
+            data = warped.read()
+            count = warped.count
+            dtype = warped.dtypes[0]
+    with tempfile.TemporaryDirectory(prefix="vrt_tile_") as tmp:
+        local_out = Path(tmp) / job["out_path"].name
+        with rasterio.open(local_out, "w", **geotiff_profile(width, height, bbox, count, dtype)) as dst:
+            dst.write(data)
+        write_bytes(job["out_path"], local_out.read_bytes())
+
+
 def download_one(job: dict) -> None:
     if job["service"] == "wms":
         download_wms(job)
-    else:
+    elif job["service"] == "wcs":
         download_wcs(job)
+    else:
+        download_vrt(job)
 
 
 def build_jobs(
@@ -550,11 +640,13 @@ def build_jobs(
     token: str,
     skip_existing: bool,
     retries: int,
+    vrt_dir: Optional[Path] = None,
 ) -> Tuple[List[dict], int]:
+    vrt_root = Path(vrt_dir) if vrt_dir is not None else DEFAULT_VRT_DIR
     pending: List[dict] = []
     n_skip = 0
     for folder_key, cfg in datatypes:
-        layer_dir = output_folder / folder_key
+        layer_dir = output_folder / cfg["output_folder"]
         for footprint in footprints:
             out_path = layer_dir / footprint["name"]
             if skip_existing and out_path.exists():
@@ -564,8 +656,10 @@ def build_jobs(
                 {
                     "service": cfg["service"],
                     "folder": folder_key,
-                    "layer": cfg["name"],
-                    "base": cfg["base"],
+                    "layer": cfg.get("name"),
+                    "base": cfg.get("base"),
+                    "path": vrt_root / cfg["path"] if cfg["service"] == "vrt" else None,
+                    "resampling": cfg.get("resampling"),
                     "bbox": footprint["bbox"],
                     "resolution": footprint["resolution"],
                     "width": footprint["width"],
@@ -601,7 +695,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--token", required=True, help="Dataforsyningen API token")
+    key_group = parser.add_mutually_exclusive_group()
+    key_group.add_argument("--apikey", default=None, help="Datafordeler API key")
+    key_group.add_argument(
+        "--apikey_file",
+        type=Path,
+        default=DEFAULT_APIKEY_FILE,
+        help=f"File containing the Datafordeler API key (default: {DEFAULT_APIKEY_FILE})",
+    )
     parser.add_argument(
         "--images_or_shapefile_defining_footprints",
         type=Path,
@@ -625,7 +726,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--output_folder",
         type=Path,
         required=True,
-        help="Root output folder; each datatype gets a subfolder",
+        help="Root output folder; each datatype writes to its configured output_folder subfolder",
+    )
+    parser.add_argument(
+        "--vrt_dir",
+        type=Path,
+        default=DEFAULT_VRT_DIR,
+        help=f"Folder containing the VRTs used by the *_vrt datatypes (default: {DEFAULT_VRT_DIR})",
     )
     parser.add_argument("--skip_existing", action="store_true", help="Skip outputs that already exist")
     parser.add_argument("--workers", type=int, default=1, help="Parallel downloads (default: 1)")
@@ -645,15 +752,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.retries < 1:
         log.error("--retries must be >= 1")
         return 1
-    if not args.token.strip():
-        log.error("--token is empty")
-        return 1
-
     try:
         datatypes = resolve_datatypes(args.datatypes)
     except ValueError as exc:
         log.error("%s", exc)
         return 1
+
+    apikey = ""
+    if any(cfg["service"] != "vrt" for _, cfg in datatypes):
+        if args.apikey is not None:
+            apikey = args.apikey.strip()
+        else:
+            try:
+                apikey = args.apikey_file.expanduser().read_text().strip()
+            except OSError as exc:
+                log.error("Cannot read --apikey_file: %s", exc)
+                return 1
+        if not apikey:
+            log.error("API key is empty")
+            return 1
 
     try:
         footprints = load_footprints(source, args.resolution)
@@ -666,7 +783,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     output_folder.mkdir(parents=True, exist_ok=True)
     pending, n_skip = build_jobs(
-        footprints, datatypes, output_folder, args.token.strip(), args.skip_existing, args.retries
+        footprints, datatypes, output_folder, apikey, args.skip_existing, args.retries, vrt_dir=args.vrt_dir
     )
     log.info("Jobs: %d pending, %d skipped existing", len(pending), n_skip)
     if not pending:
