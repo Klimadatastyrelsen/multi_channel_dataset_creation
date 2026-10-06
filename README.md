@@ -1,186 +1,113 @@
-# Multi-Channel Dataset Creation for Semantic Segmentation
+# Multi-Channel Dataset Creation
 
-Use this repository to create semantic segmentation datasets made up of multiple different modalities into a unified multi-channel datasets.
-E.g by combining imagery and LiDAR data.
+Combine imagery, elevation data and labels (rgb, cir, OrtoRGB, OrtoCIR, DSM, DTM) into multi-channel patch datasets for semantic segmentation. Data and labels are cut into patches, and the split into train and valid takes geographical overlap into account. The datasets are used with [ML_sdfi_fastai2](https://github.com/SDFIdk/ML_sdfi_fastai2).
 
-Data and labels are cut into patches and dataset is divided into train and test/valid subsets while taking geographical overlap into consideration.
-Code supports conversion of labeled polygons stored in GeoPackage files into GeoTIFF label images.  
-
-The resulting datasets can be used for training and inference with [ML_sdfi_fastai2](https://github.com/SDFIdk/ML_sdfi_fastai2).
-
----
-
-## Data Sources
-
-The accompanying "example_dataset" combines the following georeferenced layers:
-
-- **Orthophoto:** [GeoDanmark Orthophoto](https://datafordeler.dk/dataoversigt/geodanmark-ortofoto/)  
-- **Oblique Camera (Ortho Version):** [LOD Images](https://dataforsyningen.dk/data/1036)  
-- **Digital Terrain Model (DTM):** [Danmarks Højdemodel – DHM Raster Download](https://datafordeler.dk/dataoversigt/danmarks-hoejdemodel-dhm/dhm-fildownload-raster/)  
-- **Digital Surface Model (DSM):** [Danmarks Højdemodel – DHM Raster Download](https://datafordeler.dk/dataoversigt/danmarks-hoejdemodel-dhm/dhm-fildownload-raster/)  
-
----
-
-## Example Folder Structure
-
-```
-training_dataset/
-  labels/
-    large_labels/
-      image-x.tif
-  data/
-    original_data/
-      image-X_rgb.tif
-      image-X_cir.tif
-      image-X_OrtoRGB.tif
-      image-X_OrtoCIR.tif
-      image-X_DSM.tif
-      image-X_DTM.tif
-    rgb/
-      image-X.tif
-    cir/
-      image-X.tif
-    OrtoRGB/
-      image-X.tif
-    OrtoCIR/
-      image-X.tif
-    DSM/
-      image-X.tif
-    DTM/
-      image-X.tif
-```
-
-Images located in the `original_data` folder will be renamed and distributed into the appropriate subfolders (`rgb`, `cir`, `OrtoRGB`, `OrtoCIR`, `DSM`, `DTM`).  
-If `original_data` is empty, the tool will use existing images from these subfolders.
-
----
-
-## Labels
-
-Labels should be provided as **GeoPackages** containing polygon features marking different semantic areas.  
-These will be rasterized into GeoTIFF label images during dataset creation.
-
-### Class name files (`*_codes.txt`)
-
-Label GeoTIFFs store class IDs as integer pixel values. The `*_codes.txt` files map each ID to a human-readable class name: **line N corresponds to pixel value N** (0-based). These files are used when training with [ML_sdfi_fastai2](https://github.com/SDFIdk/ML_sdfi_fastai2).
-
-| File | Use with |
-|---|---|
-| `example_dataset/labels/ground_surface_codes.txt` | `example_dataset_ground_surface.gpkg` and `configs/create_dataset_example_dataset.ini` |
-| `example_dataset/labels/building_codes.txt` | `example_dataset_buildings.gpkg` and the buildings `geopackage_to_label_v2.py` example below |
-
-When training, copy the appropriate file into your training dataset as `codes.txt`, or point ML_sdfi_fastai2 at the correct path.
-
----
+Related repos (same `ML_sdfi` environment): [ML_Production](https://github.com/SDFIdk/ML_Production), [ML_geo_production](https://github.com/SDFIdk/ML_geo_production), [ML_sdfi_fastai2](https://github.com/SDFIdk/ML_sdfi_fastai2).
 
 ## Installation
 
-### Conda version
-
-Use **conda** or **mamba** (Miniforge includes conda; mamba is optional). Clone all four shared-env repos as siblings (`ML_Production`, `ML_geo_production`, `ML_sdfi_fastai2`, `multi_channel_dataset_creation`), then run the steps below **from this repository root**. The same files and commands exist in each repo and produce the same `ML_sdfi` environment.
+Clone the four repos as siblings and run from this repo root:
 
 ```sh
 conda env create --file environment.yml   # once
 conda activate ML_sdfi
-
-bash install_pytorch.sh
+bash install_pytorch.sh                   # picks the CUDA build; override with PYTORCH_CUDA=cu121
 pip install --pre --no-build-isolation -r requirements_pip.txt
 bash install_local_repos.sh
 pip install -r requirements_extra.txt
 ```
 
-`install_pytorch.sh` auto-selects the PyTorch CUDA build (nightly cu128 for Blackwell / sm_12.0, stable cu124 for other NVIDIA GPUs). CUDA is required. Override with e.g. `PYTORCH_CUDA=cu121 bash install_pytorch.sh`.
+On Windows, also run `pip install --force-reinstall pillow rasterio` once.
 
-**Verify CUDA support:**
+Docker alternative:
 
 ```sh
-python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')"
-```
-
-**Windows:** After the steps above, run once: `pip install --force-reinstall pillow rasterio` so PIL and rasterio use pip's Windows wheels.
-
-### Docker version
-
-Pull the prebuilt shared image and run with this repo as working directory:
-
-```bash
 docker pull rasmuspjohansson/kds_cuda_pytorch:latest
-
-docker run --gpus all --shm-size=100g -it \
-  -v /path/to/your/projects:/home/projects \
-  -w /home/projects/multi_channel_dataset_creation \
-  rasmuspjohansson/kds_cuda_pytorch:20260302 \
-  bash
+docker run --gpus all --shm-size=100g -it -v /path/to/projects:/home/projects \
+  -w /home/projects/multi_channel_dataset_creation rasmuspjohansson/kds_cuda_pytorch:latest bash
 ```
 
-To have all four shared-env repos installed in the container, run once from ML_Production (e.g. with `-w /home/projects/ML_Production` and `sh install_local_repos.sh && pip install -r requirements_extra.txt`). Then use `-w /home/projects/multi_channel_dataset_creation` for this repo.
+## Quickstart
 
-Example after setup:
+Create a dataset from the included example data (no GPU needed):
 
-```bash
+```sh
 python src/multi_channel_dataset_creation/create_dataset.py --dataset_config configs/create_dataset_example_dataset.ini
 ```
 
----
+Check that it ran without errors:
 
-## Usage
-
-A small example dataset is included with this repository.  
-You can generate a dataset using the example configuration:
-
-```bash
-python src/multi_channel_dataset_creation/create_dataset.py   --dataset_config configs/create_dataset_example_dataset.ini
-```
-
-To see all available options:
-
-```bash
-python src/multi_channel_dataset_creation/create_dataset.py -h
-```
-
-Creating label Images from a GeoPackage can be done with
-
-```bash
-# Ground surface: unlabeled areas as ignore (background_value == 0)
-# Class names: example_dataset/labels/ground_surface_codes.txt
-python src/multi_channel_dataset_creation/geopackage_to_label_v2.py   --geopackage example_dataset/labels/example_dataset_ground_surface.gpkg   --input_folder example_dataset/data/rgb/   --output_folder example_dataset/labels/large_labels/   --attribute ML_CATEGORY --background_value 0
-
-# Buildings: all polygons as label 2, unlabeled areas as background class 1 (background_value == 1)
-# Class names: example_dataset/labels/building_codes.txt
-python src/multi_channel_dataset_creation/geopackage_to_label_v2.py   --geopackage example_dataset/labels/example_dataset_buildings.gpkg   --input_folder example_dataset/data/rgb/   --output_folder example_dataset/labels/large_labels   --background_value 1 --value_used_for_all_polygons 2
-```
-
-Cleaning labels can be done by 
-
-1. create labels based on geopackage older than the data
-2. create labels based on geopackage newer than the data
-3. create cleaned labels based on the old and new labels
-python src/multi_channel_dataset_creation/data_cleaning_based_on_newer_ground_truth.py --old_labels dir_with_olod_labels --new_labels dir_with_new_labels --output dir_with_cleaned_labels
-Labels that have changed in this time interval should not be trrusted and are set to ingore value (0)
-
-## Verify that everything works
-
-After installation, run the example dataset creation (no CUDA required for this step):
-
-```bash
-python src/multi_channel_dataset_creation/create_dataset.py --dataset_config configs/create_dataset_example_dataset.ini
-```
-
-There should be no error messages in the output.
-
-Automated verification (runs the command above and checks `verification.log` for errors):
-
-```bash
+```sh
 python verify_functionality.py
 python check_logs.py
 ```
 
----
+## Download data for images
 
-## 📘 Notes
+`download_data_for_images.py` creates OrtoRGB, OrtoCIR, DSM and DTM with the same extent and resolution as each input image. Each product has two sources:
 
-- The tool is designed for geospatial datasets with consistent coordinate systems.  
-- Each channel (RGB, CIR, OrthoRGB, OrthoCIR, DSM, DTM) should be aligned and georeferenced properly before processing.
+- `*_datafordeler` downloads from the Datafordeler WMS/WCS. It needs an API key, read from `~/datafordelar_key.txt` by default (or passed with `--apikey` / `--apikey_file`).
+- `*_vrt` cuts from local VRTs in `--vrt_dir`, with bilinear resampling. No key is needed.
 
----
+Both sources write to the same subfolder (`OrtoRGB/`, `OrtoCIR/`, `DSM/`, `DTM/`), so only one source per product can be requested in a run.
 
+```sh
+python src/multi_channel_dataset_creation/download_data_for_images.py \
+  --images_or_shapefile_defining_footprints example_dataset/data/rgb \
+  --datatypes OrtoRGB_datafordeler OrtoCIR_datafordeler DSM_datafordeler DTM_datafordeler \
+  --output_folder /tmp/downloads --skip_existing
+
+python src/multi_channel_dataset_creation/download_data_for_images.py \
+  --images_or_shapefile_defining_footprints example_dataset/data/rgb \
+  --datatypes OrtoRGB_vrt OrtoCIR_vrt DSM_vrt DTM_vrt \
+  --vrt_dir /mnt/T/mnt/trainingdata/test_data --output_folder /tmp/downloads
+```
+
+A shapefile can be used instead of an image folder; then `--resolution` is required. See `--help` for all options.
+
+## Dataset layout
+
+```
+data/
+  original_data/   image-X_rgb.tif, image-X_cir.tif, image-X_OrtoRGB.tif, image-X_DSM.tif, ...
+  rgb/ cir/ OrtoRGB/ OrtoCIR/ DSM/ DTM/   image-X.tif
+labels/
+  large_labels/    image-X.tif
+```
+
+Files in `original_data/` are renamed and moved into the per-channel folders. If `original_data/` is empty, the existing per-channel folders are used. All channels must be georeferenced and aligned in the same coordinate system.
+
+## Labels
+
+Labels are polygons in a GeoPackage. `geopackage_to_label_v2.py` rasterizes them onto the grid of each image:
+
+```sh
+# Class from the ML_CATEGORY attribute; unlabeled areas become 0 (ignore)
+python src/multi_channel_dataset_creation/geopackage_to_label_v2.py \
+  --geopackage example_dataset/labels/example_dataset_ground_surface.gpkg \
+  --input_folder example_dataset/data/rgb/ --output_folder example_dataset/labels/large_labels/ \
+  --attribute ML_CATEGORY --background_value 0
+
+# Every polygon becomes class 2 (building); unlabeled areas become class 1 (background)
+python src/multi_channel_dataset_creation/geopackage_to_label_v2.py \
+  --geopackage example_dataset/labels/example_dataset_buildings.gpkg \
+  --input_folder example_dataset/data/rgb/ --output_folder example_dataset/labels/large_labels/ \
+  --background_value 1 --value_used_for_all_polygons 2
+```
+
+For training, ML_sdfi_fastai2 needs a `codes.txt` with one class name per line, where line N (0-based) names pixel value N.
+
+### Cleaning labels with newer ground truth
+
+Labels for areas that changed between two GeoPackage versions can't be trusted. To mask them out, create one label set from the older GeoPackage and one from the newer, then compare them. Changed pixels are set to the ignore value (0):
+
+```sh
+python src/multi_channel_dataset_creation/data_cleaning_based_on_newer_ground_truth.py \
+  --old_labels old_labels/ --new_labels new_labels/ --output cleaned_labels/ --output_csv changed_pixels.csv
+```
+
+## Data sources
+
+- Orthophoto: [GeoDanmark Ortofoto](https://datafordeler.dk/dataoversigt/geodanmark-ortofoto/)
+- Oblique images (ortho version): [LOD images](https://dataforsyningen.dk/data/1036)
+- DSM and DTM: [Danmarks Højdemodel](https://datafordeler.dk/dataoversigt/danmarks-hoejdemodel-dhm/dhm-fildownload-raster/)
