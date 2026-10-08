@@ -1,8 +1,8 @@
 # Multi-Channel Dataset Creation
 
-Combine imagery, elevation data and labels (rgb, cir, OrtoRGB, OrtoCIR, DSM, DTM) into multi-channel patch datasets for semantic segmentation. Data and labels are cut into patches, and the split into train and valid takes geographical overlap into account. The datasets are used with [ML_sdfi_fastai2](https://github.com/SDFIdk/ML_sdfi_fastai2).
+Combine imagery, elevation data and labels (rgb, cir, OrtoRGB, OrtoCIR, DSM, DTM) into multi-channel patch datasets for semantic segmentation. Data and labels are cut into patches, and the split into train and valid takes geographical overlap into account. The datasets are used with [ML_sdfi_fastai2](https://github.com/Klimadatastyrelsen/ML_sdfi_fastai2).
 
-Related repos (same `ML_sdfi` environment): [ML_Production](https://github.com/SDFIdk/ML_Production), [ML_geo_production](https://github.com/SDFIdk/ML_geo_production), [ML_sdfi_fastai2](https://github.com/SDFIdk/ML_sdfi_fastai2).
+Related repos (same `ML_sdfi` environment): [ML_Production](https://github.com/Klimadatastyrelsen/ML_Production), [ML_geo_production](https://github.com/Klimadatastyrelsen/ML_geo_production), [ML_sdfi_fastai2](https://github.com/Klimadatastyrelsen/ML_sdfi_fastai2).
 
 ## Installation
 
