@@ -89,7 +89,7 @@ bash install_local_repos.sh
 pip install -r requirements_extra.txt
 ```
 
-`install_pytorch.sh` auto-selects the PyTorch CUDA build (nightly cu128 for Blackwell / sm_12.0, stable cu124 for other NVIDIA GPUs). CUDA is required. Override with e.g. `PYTORCH_CUDA=cu121 bash install_pytorch.sh`.
+`install_pytorch.sh` installs one pinned stable PyTorch build (torch 2.11.0+cu128) that supports NVIDIA GPUs from Turing (compute capability 7.5, e.g. Quadro RTX 8000) through Blackwell (12.0, e.g. RTX PRO 6000), so old and new machines get the same environment. It checks every GPU and the driver first, and fails with a clear message for GPUs below 7.5 or drivers older than 525.60 (it warns below 570). CUDA is required. Override the index with e.g. `PYTORCH_CUDA=cu126 bash install_pytorch.sh`, or the pins with `TORCH_VERSION`, `TORCHVISION_VERSION`, `TORCHAUDIO_VERSION`.
 
 **Verify CUDA support:**
 
