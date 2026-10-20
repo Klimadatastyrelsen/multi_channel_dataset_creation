@@ -55,7 +55,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
+# GDAL's default cache is 5% of the host RAM. A 32 GB PBS job on a large
+# node then spends the whole limit on cache, and the float32 DSM/DTM frames
+# (about 900 MB each) fail to allocate.
+os.environ.setdefault("GDAL_CACHEMAX", "2048")
+
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 import rasterio
 from rasterio.crs import CRS
@@ -65,7 +71,6 @@ from rasterio.transform import from_bounds
 from rasterio.vrt import WarpedVRT
 from rasterio.warp import transform_bounds
 from rasterio.windows import Window
-from rasterio.windows import from_bounds as window_from_bounds
 from tqdm import tqdm
 
 log = logging.getLogger("download_data_for_images")
@@ -642,60 +647,33 @@ def _bounds_in_target_crs(src) -> Bbox:
     return float(left), float(bottom), float(right), float(top)
 
 
-def _read_vrt_window(src, job: dict, bands: Optional[Sequence[int]]):
-    """Read job's window. Same-CRS VRTs use a windowed read; others are warped."""
-    bbox = job["bbox"]
-    width = job["width"]
-    height = job["height"]
+# One strip stays near this size. A full 0.1 m oblique DSM frame is ~900 MB.
+STRIP_BYTES = 32 * 1024 * 1024
+
+
+def _strip_rows(width: int, count: int, itemsize: int) -> int:
+    row_bytes = max(1, width * max(1, count) * max(1, itemsize))
+    return max(16, min(512, STRIP_BYTES // row_bytes))
+
+
+def _ensure_inside(src, job: dict) -> None:
     if src.crs is None:
         raise RuntimeError(f"{job['path']} has no CRS")
     src_bounds = _bounds_in_target_crs(src)
-    xmin, ymin, xmax, ymax = bbox
+    xmin, ymin, xmax, ymax = job["bbox"]
     if xmin < src_bounds[0] or ymin < src_bounds[1] or xmax > src_bounds[2] or ymax > src_bounds[3]:
-        raise RuntimeError(f"Footprint {bbox} is not fully inside {job['path']} (bounds {src_bounds})")
-    resampling = Resampling[job["resampling"]]
-    indexes = list(bands) if bands else None
-    count = len(indexes) if indexes is not None else src.count
-    if src.crs == _TARGET_CRS_OBJ:
-        window = window_from_bounds(xmin, ymin, xmax, ymax, transform=src.transform)
-        return src.read(
-            indexes=indexes,
-            window=window,
-            out_shape=(count, height, width),
-            resampling=resampling,
-        )
-    with WarpedVRT(
-        src,
-        crs=TARGET_CRS,
-        transform=from_bounds(xmin, ymin, xmax, ymax, width, height),
-        width=width,
-        height=height,
-        resampling=resampling,
-    ) as warped:
-        return warped.read(indexes=indexes) if indexes else warped.read()
-
-
-def _write_vrt_output(job: dict, data) -> None:
-    """Compress on local disk, then move the finished GeoTIFF into place."""
-    out_path = Path(job["out_path"])
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    partial = out_path.with_name(out_path.name + ".partial")
-    with tempfile.TemporaryDirectory(prefix="vrt_tile_") as tmp:
-        local_out = Path(tmp) / out_path.name
-        with rasterio.open(
-            local_out,
-            "w",
-            **geotiff_profile(job["width"], job["height"], job["bbox"], int(data.shape[0]), data.dtype.name),
-        ) as dst:
-            dst.write(data)
-        shutil.copyfile(local_out, partial)
-    os.replace(partial, out_path)
+        raise RuntimeError(f"Footprint {job['bbox']} is not fully inside {job['path']} (bounds {src_bounds})")
 
 
 def _download_vrt_group(jobs: Sequence[dict]) -> None:
-    """Read a shared window once and write each job's bands."""
+    """Warp one window in row strips and write each job's bands.
+
+    Strips keep a 12500 x 18000 float32 DSM/DTM frame from being allocated
+    all at once (about 900 MB, times the number of worker threads).
+    """
     job0 = jobs[0]
     src = _cached_vrt(Path(job0["path"]))
+    _ensure_inside(src, job0)
     band_lists: List[Optional[List[int]]] = []
     merged: List[int] = []
     read_all = False
@@ -710,15 +688,62 @@ def _download_vrt_group(jobs: Sequence[dict]) -> None:
         for band in selected:
             if band not in merged:
                 merged.append(band)
-    if read_all:
-        for job in jobs:
-            _write_vrt_output(job, _read_vrt_window(src, job, job.get("bands")))
-        return
-    data = _read_vrt_window(src, job0, merged)
-    positions = {band: index for index, band in enumerate(merged)}
-    for job, selected in zip(jobs, band_lists):
-        assert selected is not None
-        _write_vrt_output(job, data[[positions[band] for band in selected]])
+    indexes = None if read_all else merged
+    width = int(job0["width"])
+    height = int(job0["height"])
+    xmin, ymin, xmax, ymax = job0["bbox"]
+    with WarpedVRT(
+        src,
+        crs=TARGET_CRS,
+        transform=from_bounds(xmin, ymin, xmax, ymax, width, height),
+        width=width,
+        height=height,
+        resampling=Resampling[job0["resampling"]],
+        warp_mem_limit=64,
+    ) as warped:
+        if indexes is None:
+            index_groups: List[Optional[List[int]]] = [None] * len(jobs)
+            counts = [warped.count] * len(jobs)
+            read_count = warped.count
+        else:
+            positions = {band: index for index, band in enumerate(indexes)}
+            index_groups = [[positions[band] for band in selected] for selected in band_lists]
+            counts = [len(group) for group in index_groups]  # type: ignore[arg-type]
+            read_count = len(indexes)
+        dtype = warped.dtypes[0]
+        strip_rows = _strip_rows(width, read_count, np.dtype(dtype).itemsize)
+        datasets = []
+        partials = []
+        local_paths = []
+        with tempfile.TemporaryDirectory(prefix="vrt_tile_") as tmp:
+            try:
+                for index, (job, count) in enumerate(zip(jobs, counts)):
+                    out_path = Path(job["out_path"])
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    local_out = Path(tmp) / f"{index}_{out_path.parent.name}_{out_path.name}"
+                    local_paths.append(local_out)
+                    datasets.append(
+                        rasterio.open(
+                            local_out,
+                            "w",
+                            **geotiff_profile(width, height, job["bbox"], count, dtype),
+                        )
+                    )
+                    partials.append(out_path.with_name(out_path.name + ".partial"))
+                row0 = 0
+                while row0 < height:
+                    row_count = min(strip_rows, height - row0)
+                    data = warped.read(indexes=indexes, window=Window(0, row0, width, row_count))
+                    for dst, group in zip(datasets, index_groups):
+                        piece = data if group is None else np.ascontiguousarray(data[group])
+                        dst.write(piece, window=Window(0, row0, width, row_count))
+                    row0 += row_count
+            finally:
+                for dst in datasets:
+                    dst.close()
+            for local_out, partial, job in zip(local_paths, partials, jobs):
+                shutil.copyfile(local_out, partial)
+                os.replace(partial, Path(job["out_path"]))
 
 
 def download_vrt(job: dict) -> None:
