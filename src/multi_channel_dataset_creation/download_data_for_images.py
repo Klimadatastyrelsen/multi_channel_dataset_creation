@@ -76,14 +76,18 @@ Bbox = Tuple[float, float, float, float]
 ORTO_WMS = "https://wms.datafordeler.dk/GeoDanmarkOrto/orto_foraar/1.0.0/WMS"
 DHM_WCS = "https://wcs.datafordeler.dk/DHMNedboer/dhm_wcs/1.0.0/WCS"
 
-# Default folder for the VRTs; override with --vrt_dir. The defaults are test
-# VRTs with dummy data covering Denmark at 1 km resolution.
+# Default folder for relative VRT paths; override with --vrt_dir.
+# An absolute "path" is used as-is and does not depend on this folder.
 DEFAULT_VRT_DIR = Path("/mnt/T/mnt/trainingdata/test_data")
-RGB_VRT = "denmark_test_1km.vrt"
-FLOAT_VRT = "denmark_test_1km_float32.vrt"
+# 2026 BEF products on Computerome. orto_2026.vrt is R, G, B, NIR.
+BEF_DATA = Path("/home/projects/sdfi/data/bef_data")
+ORTO_2026_VRT = BEF_DATA / "orto_photo_2026" / "orto_2026.vrt"
+DSM_2026_VRT = BEF_DATA / "dsm_2026" / "dsm_2026.vrt"
+DTM_2026_VRT = BEF_DATA / "dtm_2026" / "dtm_2026.vrt"
 
 # Friendly name -> Datafordeler service or local VRT.
-# VRT "path" is relative to the VRT folder. "resampling" is a
+# Relative VRT "path" is under the VRT folder. Absolute paths are used as-is.
+# "bands" is 1-based; omitted means every band. "resampling" is a
 # rasterio.enums.Resampling name.
 DATATYPES: Dict[str, dict] = {
     "OrtoRGB_datafordeler": {
@@ -112,25 +116,29 @@ DATATYPES: Dict[str, dict] = {
     },
     "OrtoRGB_vrt": {
         "service": "vrt",
-        "path": RGB_VRT,
+        "path": str(ORTO_2026_VRT),
+        "bands": [1, 2, 3],
         "resampling": "bilinear",
         "output_folder": "OrtoRGB",
     },
     "OrtoCIR_vrt": {
         "service": "vrt",
-        "path": RGB_VRT,
+        "path": str(ORTO_2026_VRT),
+        "bands": [4],
         "resampling": "bilinear",
         "output_folder": "OrtoCIR",
     },
     "DSM_vrt": {
         "service": "vrt",
-        "path": FLOAT_VRT,
+        "path": str(DSM_2026_VRT),
+        "bands": [1],
         "resampling": "bilinear",
         "output_folder": "DSM",
     },
     "DTM_vrt": {
         "service": "vrt",
-        "path": FLOAT_VRT,
+        "path": str(DTM_2026_VRT),
+        "bands": [1],
         "resampling": "bilinear",
         "output_folder": "DTM",
     },
@@ -614,9 +622,10 @@ def download_vrt(job: dict) -> None:
             height=height,
             resampling=Resampling[job["resampling"]],
         ) as warped:
-            data = warped.read()
-            count = warped.count
-            dtype = warped.dtypes[0]
+            bands = job.get("bands")
+            data = warped.read(indexes=bands) if bands else warped.read()
+            count = int(data.shape[0])
+            dtype = data.dtype.name
     with tempfile.TemporaryDirectory(prefix="vrt_tile_") as tmp:
         local_out = Path(tmp) / job["out_path"].name
         with rasterio.open(local_out, "w", **geotiff_profile(width, height, bbox, count, dtype)) as dst:
@@ -631,6 +640,14 @@ def download_one(job: dict) -> None:
         download_wcs(job)
     else:
         download_vrt(job)
+
+
+def _vrt_path(cfg: dict, vrt_root: Path) -> Path:
+    """Absolute VRT paths are used as-is. Relative paths are under vrt_root."""
+    path = Path(cfg["path"])
+    if path.is_absolute():
+        return path
+    return vrt_root / path
 
 
 def build_jobs(
@@ -658,7 +675,8 @@ def build_jobs(
                     "folder": folder_key,
                     "layer": cfg.get("name"),
                     "base": cfg.get("base"),
-                    "path": vrt_root / cfg["path"] if cfg["service"] == "vrt" else None,
+                    "path": _vrt_path(cfg, vrt_root) if cfg["service"] == "vrt" else None,
+                    "bands": cfg.get("bands"),
                     "resampling": cfg.get("resampling"),
                     "bbox": footprint["bbox"],
                     "resolution": footprint["resolution"],
