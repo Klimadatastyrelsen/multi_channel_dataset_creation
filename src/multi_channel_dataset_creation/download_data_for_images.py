@@ -38,10 +38,14 @@ Example (shapefile; --resolution is required)::
 from __future__ import annotations
 
 import argparse
+import atexit
 import logging
 import math
+import os
+import shutil
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -54,17 +58,25 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 import geopandas as gpd
 import pandas as pd
 import rasterio
+from rasterio.crs import CRS
 from rasterio.enums import Resampling
 from rasterio.errors import NotGeoreferencedWarning
 from rasterio.transform import from_bounds
 from rasterio.vrt import WarpedVRT
 from rasterio.warp import transform_bounds
 from rasterio.windows import Window
+from rasterio.windows import from_bounds as window_from_bounds
 from tqdm import tqdm
 
 log = logging.getLogger("download_data_for_images")
 
 TARGET_CRS = "EPSG:25832"
+_TARGET_CRS_OBJ = CRS.from_user_input(TARGET_CRS)
+# One open dataset per worker thread. The national VRTs are expensive to parse,
+# and a dataset must not be read from two threads at once.
+_VRT_THREAD = threading.local()
+_DOWNLOAD_POOL: Optional[ThreadPoolExecutor] = None
+_DOWNLOAD_POOL_SIZE: Optional[int] = None
 WMS_FORMAT = "image/jpeg"
 DEFAULT_APIKEY_FILE = Path.home() / "datafordelar_key.txt"
 # Datafordeler WMS rejects WIDTH or HEIGHT above 10000. Pieces are kept
@@ -600,37 +612,118 @@ def download_wcs(job: dict) -> None:
         write_bytes(job["out_path"], local_out.read_bytes())
 
 
-def download_vrt(job: dict) -> None:
-    """Warp the VRT onto the footprint grid and write it as a GeoTIFF."""
+def _configure_gdal_for_vrt() -> None:
+    """Avoid a directory listing for every source file inside a large VRT."""
+    os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+    os.environ.setdefault("GDAL_MAX_DATASET_POOL_SIZE", "512")
+
+
+def _cached_vrt(path: Path):
+    """Return this thread's open dataset for path, opening it on first use."""
+    _configure_gdal_for_vrt()
+    cache = getattr(_VRT_THREAD, "datasets", None)
+    if cache is None:
+        cache = {}
+        _VRT_THREAD.datasets = cache
+    key = str(path)
+    dataset = cache.get(key)
+    if dataset is None or dataset.closed:
+        started = time.perf_counter()
+        dataset = rasterio.open(path)
+        log.info("Opened %s in %.1fs", path, time.perf_counter() - started)
+        cache[key] = dataset
+    return dataset
+
+
+def _bounds_in_target_crs(src) -> Bbox:
+    left, bottom, right, top = src.bounds
+    if src.crs != _TARGET_CRS_OBJ:
+        left, bottom, right, top = transform_bounds(src.crs, TARGET_CRS, left, bottom, right, top, densify_pts=21)
+    return float(left), float(bottom), float(right), float(top)
+
+
+def _read_vrt_window(src, job: dict, bands: Optional[Sequence[int]]):
+    """Read job's window. Same-CRS VRTs use a windowed read; others are warped."""
     bbox = job["bbox"]
     width = job["width"]
     height = job["height"]
-    with rasterio.open(job["path"]) as src:
-        if src.crs is None:
-            raise RuntimeError(f"{job['path']} has no CRS")
-        src_bounds = src.bounds
-        if str(src.crs) != TARGET_CRS:
-            src_bounds = transform_bounds(src.crs, TARGET_CRS, *src_bounds, densify_pts=21)
-        xmin, ymin, xmax, ymax = bbox
-        if xmin < src_bounds[0] or ymin < src_bounds[1] or xmax > src_bounds[2] or ymax > src_bounds[3]:
-            raise RuntimeError(f"Footprint {bbox} is not fully inside {job['path']} (bounds {tuple(src_bounds)})")
-        with WarpedVRT(
-            src,
-            crs=TARGET_CRS,
-            transform=from_bounds(xmin, ymin, xmax, ymax, width, height),
-            width=width,
-            height=height,
-            resampling=Resampling[job["resampling"]],
-        ) as warped:
-            bands = job.get("bands")
-            data = warped.read(indexes=bands) if bands else warped.read()
-            count = int(data.shape[0])
-            dtype = data.dtype.name
+    if src.crs is None:
+        raise RuntimeError(f"{job['path']} has no CRS")
+    src_bounds = _bounds_in_target_crs(src)
+    xmin, ymin, xmax, ymax = bbox
+    if xmin < src_bounds[0] or ymin < src_bounds[1] or xmax > src_bounds[2] or ymax > src_bounds[3]:
+        raise RuntimeError(f"Footprint {bbox} is not fully inside {job['path']} (bounds {src_bounds})")
+    resampling = Resampling[job["resampling"]]
+    indexes = list(bands) if bands else None
+    count = len(indexes) if indexes is not None else src.count
+    if src.crs == _TARGET_CRS_OBJ:
+        window = window_from_bounds(xmin, ymin, xmax, ymax, transform=src.transform)
+        return src.read(
+            indexes=indexes,
+            window=window,
+            out_shape=(count, height, width),
+            resampling=resampling,
+        )
+    with WarpedVRT(
+        src,
+        crs=TARGET_CRS,
+        transform=from_bounds(xmin, ymin, xmax, ymax, width, height),
+        width=width,
+        height=height,
+        resampling=resampling,
+    ) as warped:
+        return warped.read(indexes=indexes) if indexes else warped.read()
+
+
+def _write_vrt_output(job: dict, data) -> None:
+    """Compress on local disk, then move the finished GeoTIFF into place."""
+    out_path = Path(job["out_path"])
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    partial = out_path.with_name(out_path.name + ".partial")
     with tempfile.TemporaryDirectory(prefix="vrt_tile_") as tmp:
-        local_out = Path(tmp) / job["out_path"].name
-        with rasterio.open(local_out, "w", **geotiff_profile(width, height, bbox, count, dtype)) as dst:
+        local_out = Path(tmp) / out_path.name
+        with rasterio.open(
+            local_out,
+            "w",
+            **geotiff_profile(job["width"], job["height"], job["bbox"], int(data.shape[0]), data.dtype.name),
+        ) as dst:
             dst.write(data)
-        write_bytes(job["out_path"], local_out.read_bytes())
+        shutil.copyfile(local_out, partial)
+    os.replace(partial, out_path)
+
+
+def _download_vrt_group(jobs: Sequence[dict]) -> None:
+    """Read a shared window once and write each job's bands."""
+    job0 = jobs[0]
+    src = _cached_vrt(Path(job0["path"]))
+    band_lists: List[Optional[List[int]]] = []
+    merged: List[int] = []
+    read_all = False
+    for job in jobs:
+        bands = job.get("bands")
+        if not bands:
+            read_all = True
+            band_lists.append(None)
+            continue
+        selected = [int(band) for band in bands]
+        band_lists.append(selected)
+        for band in selected:
+            if band not in merged:
+                merged.append(band)
+    if read_all:
+        for job in jobs:
+            _write_vrt_output(job, _read_vrt_window(src, job, job.get("bands")))
+        return
+    data = _read_vrt_window(src, job0, merged)
+    positions = {band: index for index, band in enumerate(merged)}
+    for job, selected in zip(jobs, band_lists):
+        assert selected is not None
+        _write_vrt_output(job, data[[positions[band] for band in selected]])
+
+
+def download_vrt(job: dict) -> None:
+    """Cut the VRT onto the footprint grid and write it as a GeoTIFF."""
+    _download_vrt_group([job])
 
 
 def download_one(job: dict) -> None:
@@ -690,21 +783,85 @@ def build_jobs(
     return pending, n_skip
 
 
+def _vrt_group_key(job: dict) -> Optional[tuple]:
+    """Jobs that share this key are one window read. None means download alone."""
+    if job.get("service") != "vrt" or not job.get("bands"):
+        return None
+    return (
+        str(job["path"]),
+        tuple(job["bbox"]),
+        int(job["width"]),
+        int(job["height"]),
+        job.get("resampling"),
+    )
+
+
+def _download_pool(workers: int) -> ThreadPoolExecutor:
+    """Reuse worker threads so each one keeps its VRT datasets open."""
+    global _DOWNLOAD_POOL, _DOWNLOAD_POOL_SIZE
+    if _DOWNLOAD_POOL is None or _DOWNLOAD_POOL_SIZE != workers:
+        if _DOWNLOAD_POOL is not None:
+            _DOWNLOAD_POOL.shutdown(wait=True)
+        _DOWNLOAD_POOL = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="download")
+        _DOWNLOAD_POOL_SIZE = workers
+    return _DOWNLOAD_POOL
+
+
+def _shutdown_download_pool() -> None:
+    global _DOWNLOAD_POOL, _DOWNLOAD_POOL_SIZE
+    pool = _DOWNLOAD_POOL
+    _DOWNLOAD_POOL = None
+    _DOWNLOAD_POOL_SIZE = None
+    if pool is not None:
+        pool.shutdown(wait=True)
+
+
+atexit.register(_shutdown_download_pool)
+
+
+def _run_download_task(task: tuple) -> Sequence[dict]:
+    kind, payload = task
+    if kind == "group":
+        _download_vrt_group(payload)
+        return payload
+    download_one(payload)
+    return [payload]
+
+
 def run_downloads(pending: List[dict], workers: int) -> List[str]:
-    """Download every job. Return error lines for the ones that failed."""
+    """Download every job. Return error lines for the ones that failed.
+
+    VRT jobs that share a path and window are read once (so OrtoRGB and OrtoCIR
+    come from a single pass over the 4-band ortho).
+    """
     failed: List[str] = []
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(download_one, job): job for job in pending}
-        with tqdm(total=len(pending), desc="Downloading", unit="tile") as pbar:
-            for fut in as_completed(futures):
-                job = futures[fut]
-                try:
-                    fut.result()
-                except Exception as exc:  # noqa: BLE001
-                    message = hide_token(str(exc), job["token"])
+    groups: Dict[tuple, List[dict]] = {}
+    order: List[tuple] = []
+    tasks: List[tuple] = []
+    for job in pending:
+        key = _vrt_group_key(job)
+        if key is None:
+            tasks.append(("one", job))
+            continue
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(job)
+    tasks.extend(("group", groups[key]) for key in order)
+
+    futures = {_download_pool(workers).submit(_run_download_task, task): task for task in tasks}
+    with tqdm(total=len(pending), desc="Downloading", unit="tile") as pbar:
+        for fut in as_completed(futures):
+            kind, payload = futures[fut]
+            jobs = payload if kind == "group" else [payload]
+            try:
+                fut.result()
+            except Exception as exc:  # noqa: BLE001
+                message = hide_token(str(exc), jobs[0].get("token", ""))
+                for job in jobs:
                     log.error("%s: %s", job["out_path"], message)
                     failed.append(f"{job['out_path']}: {message}")
-                pbar.update(1)
+            pbar.update(len(jobs))
     return failed
 
 
