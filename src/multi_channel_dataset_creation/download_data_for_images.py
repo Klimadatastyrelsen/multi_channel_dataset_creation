@@ -722,13 +722,12 @@ def _download_vrt_group(jobs: Sequence[dict]) -> None:
                     out_path.parent.mkdir(parents=True, exist_ok=True)
                     local_out = Path(tmp) / f"{index}_{out_path.parent.name}_{out_path.name}"
                     local_paths.append(local_out)
-                    datasets.append(
-                        rasterio.open(
-                            local_out,
-                            "w",
-                            **geotiff_profile(width, height, job["bbox"], count, dtype),
-                        )
+                    dataset = rasterio.open(
+                        local_out,
+                        "w",
+                        **geotiff_profile(width, height, job["bbox"], count, dtype),
                     )
+                    datasets.append(dataset)
                     partials.append(out_path.with_name(out_path.name + ".partial"))
                 row0 = 0
                 while row0 < height:
